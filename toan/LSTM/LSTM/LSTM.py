@@ -1,165 +1,102 @@
-import os
-import time
-import ptb_reader
-import numpy as np
+from __future__ import print_function
+
 import tensorflow as tf
-from ptb_model import PTBModel
+from tensorflow.contrib import rnn
+
+# Import MNIST data
+from tensorflow.examples.tutorials.mnist import input_data
+mnist = input_data.read_data_sets("/tmp/data/", one_hot=True)
+
+'''
+To classify images using a recurrent neural network, we consider every image
+row as a sequence of pixels. Because MNIST image shape is 28*28px, we will then
+handle 28 sequences of 28 steps for every sample.
+'''
+
+# Training Parameters
+learning_rate = 0.001
+training_steps = 1000
+batch_size = 128
+display_step = 200
+
+# Network Parameters
+num_input = 28 # MNIST data input (img shape: 28*28)
+timesteps = 28 # timesteps
+num_hidden = 128 # hidden layer num of features
+num_classes = 10 # MNIST total classes (0-9 digits)
+
+# tf Graph input
+X = tf.placeholder("float", [None, timesteps, num_input])
+Y = tf.placeholder("float", [None, num_classes])
+
+# Define weights
+weights = {
+    'out': tf.Variable(tf.random_normal([num_hidden, num_classes]))
+}
+biases = {
+    'out': tf.Variable(tf.random_normal([num_classes]))
+}
 
 
-class SmallConfig(object):
-    """Small config."""
-    init_scale = 0.1
-    learning_rate = 1.0
-    max_grad_norm = 5
-    num_layers = 2
-    num_steps = 10  # 20
-    hidden_size = 100  # 200
-    max_epoch = 2  # 4
-    max_max_epoch = 5  # 13
-    keep_prob = 1.0
-    lr_decay = 0.5
-    batch_size = 20
-    vocab_size = 10000  # 10000
+def RNN(x, weights, biases):
 
+    # Prepare data shape to match `rnn` function requirements
+    # Current data input shape: (batch_size, timesteps, n_input)
+    # Required shape: 'timesteps' tensors list of shape (batch_size, n_input)
 
-class MediumConfig(object):
-    """Medium config."""
-    init_scale = 0.05
-    learning_rate = 1.0
-    max_grad_norm = 5
-    num_layers = 2
-    num_steps = 35
-    hidden_size = 650
-    max_epoch = 6
-    max_max_epoch = 39
-    keep_prob = 0.5
-    lr_decay = 0.8
-    batch_size = 20
-    vocab_size = 10000
+    # Unstack to get a list of 'timesteps' tensors of shape (batch_size, n_input)
+    x = tf.unstack(x, timesteps, 1)
 
+    # Define a lstm cell with tensorflow
+    lstm_cell = rnn.BasicLSTMCell(num_hidden, forget_bias=1.0)
 
-class LargeConfig(object):
-    """Large config."""
-    init_scale = 0.04
-    learning_rate = 1.0
-    max_grad_norm = 10
-    num_layers = 2
-    num_steps = 35
-    hidden_size = 1500
-    max_epoch = 14
-    max_max_epoch = 55
-    keep_prob = 0.35
-    lr_decay = 1 / 1.15
-    batch_size = 20
-    vocab_size = 10000
+    # Get lstm cell output
+    outputs, states = rnn.static_rnn(lstm_cell, x, dtype=tf.float32)
 
+    # Linear activation, using rnn inner loop last output
+    return tf.matmul(outputs[-1], weights['out']) + biases['out']
 
-def run_epoch(session, m, data, eval_op, verbose=False, vocabulary=None):
-    """
-    :param session for computation
-    :param m model object
-    :param data input data
-    :param eval_op
-    :param verbose
-    :param vocabulary
-    Runs the model on the given data."""
-    epoch_size = ((len(data) // m.batch_size) - 1) // m.num_steps
-    start_time = time.time()
-    costs = 0.0
-    iters = 0
-    state = m.initial_state.eval()
-    for step, (x, y) in enumerate(ptb_reader.ptb_iterator(data, m.batch_size,
-                                                      m.num_steps)):
-        cost, state, probs, logits, _ = session.run([m.cost, m.final_state, m.probabilities, m.logits, eval_op],
-                                                    {m.input_data: x,
-                                                     m.targets: y,
-                                                     m.initial_state: state})
-        costs += cost
-        iters += m.num_steps
+logits = RNN(X, weights, biases)
+prediction = tf.nn.softmax(logits)
 
-        if verbose and step % (epoch_size // 10) == 10:
-            print("%.3f perplexity: %.3f speed: %.0f wps" %
-                  (step * 1.0 / epoch_size, np.exp(costs / iters),
-                   iters * m.batch_size / (time.time() - start_time)))
-            chosen_word = np.argmax(probs, 1)
-            print("Probabilities shape: %s, Logits shape: %s" %
-                  (probs.shape, logits.shape) )
-            print(chosen_word)
-            if vocabulary is not None:
-                next_word_id = chosen_word[-1]
-                for word_, word_id_ in vocabulary.iteritems():
-                    if word_id_ == next_word_id:
-                        print(word_)
+# Define loss and optimizer
+loss_op = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
+    logits=logits, labels=Y))
+optimizer = tf.train.GradientDescentOptimizer(learning_rate=learning_rate)
+train_op = optimizer.minimize(loss_op)
 
-            print("Batch size: %s, Num steps: %s" % (m.batch_size, m.num_steps))
+# Evaluate model (with test logits, for dropout to be disabled)
+correct_pred = tf.equal(tf.argmax(prediction, 1), tf.argmax(Y, 1))
+accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
 
-    return np.exp(costs / iters)
+# Initialize the variables (i.e. assign their default value)
+init = tf.global_variables_initializer()
 
+# Start training
+with tf.Session() as sess:
 
-def get_config(model_option):
-    if model_option == "small":
-        return SmallConfig()
-    elif model_option == "medium":
-        return MediumConfig()
-    elif model_option == "large":
-        return LargeConfig()
-    else:
-        raise ValueError("Invalid model: %s", model_option)
+    # Run the initializer
+    sess.run(init)
 
+    for step in range(1, training_steps+1):
+        batch_x, batch_y = mnist.train.next_batch(batch_size)
+        # Reshape data to get 28 seq of 28 elements
+        batch_x = batch_x.reshape((batch_size, timesteps, num_input))
+        # Run optimization op (backprop)
+        sess.run(train_op, feed_dict={X: batch_x, Y: batch_y})
+        if step % display_step == 0 or step == 1:
+            # Calculate batch loss and accuracy
+            loss, acc = sess.run([loss_op, accuracy], feed_dict={X: batch_x,
+                                                                 Y: batch_y})
+            print("Step " + str(step) + ", Minibatch Loss= " + \
+                  "{:.4f}".format(loss) + ", Training Accuracy= " + \
+                  "{:.3f}".format(acc))
 
-def main():
-    # --data_path=/tmp/simple-examples/data/ --model small
-    data_path = './data/'
-    # link to download zip file simple-examples: http://www.fit.vutbr.cz/~imikolov/rnnlm/simple-examples.tgz
-    model_option = 'small'
-    if not data_path:
-        raise ValueError("Must set --data_path to PTB data directory")
+    print("Optimization Finished!")
 
-    out_dir = 'models'
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
-    checkpoint_dir = os.path.join(out_dir, "checkpoints")
-    checkpoint_prefix = os.path.join(checkpoint_dir, "model")
-    if not os.path.exists(checkpoint_dir):
-        os.makedirs(checkpoint_dir)
-
-    raw_data = ptb_reader.ptb_raw_data(data_path)
-    train_data, valid_data, test_data, vocabulary = raw_data
-
-    config = get_config(model_option)
-    eval_config = get_config(model_option)
-    eval_config.batch_size = 1
-    eval_config.num_steps = 1
-
-    with tf.Graph().as_default(), tf.Session() as session:
-        initializer = tf.random_uniform_initializer(-config.init_scale,
-                                                    config.init_scale)
-        with tf.variable_scope("model", reuse=None, initializer=initializer):
-            m = PTBModel(is_training=True, config=config)
-        with tf.variable_scope("model", reuse=True, initializer=initializer):
-            mvalid = PTBModel(is_training=False, config=config)
-            mtest = PTBModel(is_training=False, config=eval_config)
-
-        saver = tf.train.Saver(tf.all_variables(), max_to_keep=1)
-        tf.initialize_all_variables().run()
-
-        for i in range(config.max_max_epoch):
-            lr_decay = config.lr_decay ** max(i - config.max_epoch, 0.0)
-            m.assign_lr(session, config.learning_rate * lr_decay)
-
-            print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
-            train_perplexity = run_epoch(session, m, train_data, m.train_op,
-                                         verbose=True, vocabulary=vocabulary)
-            print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
-            valid_perplexity = run_epoch(session, mvalid, valid_data, tf.no_op(), vocabulary=vocabulary)
-            print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
-
-            path = saver.save(session, checkpoint_prefix, global_step=i)
-            print('save to: ' + str(path))
-
-        test_perplexity = run_epoch(session, mtest, test_data, tf.no_op(), vocabulary=vocabulary)
-        print("Test Perplexity: %.3f" % test_perplexity)
-
-
-if __name__ == "__main__":
-    main()
+    # Calculate accuracy for 128 mnist test images
+    test_len = 128
+    test_data = mnist.test.images[:test_len].reshape((-1, timesteps, num_input))
+    test_label = mnist.test.labels[:test_len]
+    print("Testing Accuracy:", \
+        sess.run(accuracy, feed_dict={X: test_data, Y: test_label}))
